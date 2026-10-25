@@ -1,0 +1,7 @@
+# Core requirements for the background remover.
+#   pip install -r requirements.txt
+rembg[cpu]>=2.0.50
+pillow>=10.0
+
+# Optional: uncomment to read HEIC/HEIF photos straight from an iPhone.
+# pillow-heif>=0.16

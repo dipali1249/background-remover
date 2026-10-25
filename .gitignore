@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Tool output
+*_nobg.png
+*_nobg.jpg
+*_nobg.webp
+nobg/
+cutouts/
+
+# Downloaded models live in ~/.u2net, never in the repo
+*.onnx

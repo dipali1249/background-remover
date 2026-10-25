@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Background Remover</title>
+<style>
+  :root{
+    --bg:#0b0f16; --panel:#121824; --panel-2:#18202e; --line:#253145;
+    --text:#e8eef7; --muted:#8b9bb4; --accent:#4f8cff; --accent-2:#22d3a6;
+    --danger:#f2647a; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 15% -10%, #17233a 0%, var(--bg) 55%) no-repeat, var(--bg);
+    color:var(--text); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  header{
+    display:flex; align-items:center; gap:14px; padding:16px 24px;
+    border-bottom:1px solid var(--line); background:rgba(11,15,22,.7); backdrop-filter:blur(8px);
+    position:sticky; top:0; z-index:20;
+  }
+  .logo{
+    width:30px;height:30px;border-radius:9px;flex:none;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    display:grid;place-items:center;color:#04121f;font-weight:800;font-size:15px;
+  }
+  header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+  header .sub{color:var(--muted);font-size:12.5px;margin-left:2px}
+  .status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 0 3px rgba(34,211,166,.15)}
+  .dot.busy{background:#f6b73c;box-shadow:0 0 0 3px rgba(246,183,60,.18);animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+
+  main{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;padding:20px 24px 28px;max-width:1500px;margin:0 auto}
+  @media (max-width:940px){ main{grid-template-columns:1fr} }
+
+  /* ---------- stage ---------- */
+  .stage-wrap{display:flex;flex-direction:column;gap:12px;min-width:0}
+  .stage{
+    position:relative; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden;
+    background:var(--panel); min-height:420px; height:min(66vh,660px); display:grid; place-items:center;
+  }
+  .checker{
+    position:absolute; inset:0;
+    background-image:
+      linear-gradient(45deg,#1b2433 25%,transparent 25%,transparent 75%,#1b2433 75%),
+      linear-gradient(45deg,#1b2433 25%,transparent 25%,transparent 75%,#1b2433 75%);
+    background-size:22px 22px; background-position:0 0,11px 11px; background-color:#141b27;
+  }
+  .stage img{position:absolute; inset:0; width:100%; height:100%; object-fit:contain; user-select:none; -webkit-user-drag:none}
+  /* the original sits on top and is clipped to the left of the divider, so the
+     right-hand side shows the cutout over the checkerboard, never through it */
+  #imgOriginal{z-index:3} #imgResult{z-index:2}
+
+  /* dropzone */
+  .drop{
+    position:absolute; inset:0; display:grid; place-content:center; justify-items:center; gap:10px;
+    text-align:center; padding:30px; cursor:pointer; transition:.15s; z-index:5;
+  }
+  .drop .icon{
+    width:64px;height:64px;border-radius:18px;border:1.5px dashed #3b4c66;display:grid;place-items:center;
+    color:var(--accent); background:rgba(79,140,255,.06);
+  }
+  .drop h2{margin:6px 0 0;font-size:17px;font-weight:600}
+  .drop p{margin:0;color:var(--muted);font-size:13px;max-width:380px}
+  .drop .kbd{border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:11.5px;color:var(--muted);background:var(--panel-2)}
+  .stage.dragover .drop{background:rgba(79,140,255,.10);outline:2px dashed var(--accent);outline-offset:-8px}
+
+  /* compare slider */
+  .divider{position:absolute; top:0; bottom:0; width:2px; background:#fff; box-shadow:0 0 12px rgba(0,0,0,.6); z-index:8; cursor:ew-resize}
+  .divider::after{
+    content:""; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+    width:36px;height:36px;border-radius:50%;background:#fff;
+    box-shadow:0 2px 10px rgba(0,0,0,.45);
+    background-image:linear-gradient(90deg,#0b0f16 0 6px,transparent 6px 12px,#0b0f16 12px);
+    background-repeat:no-repeat; background-position:center; background-size:14px 8px;
+  }
+  .tag{position:absolute;top:10px;font-size:11px;letter-spacing:.4px;text-transform:uppercase;color:#cbd5e1;
+       background:rgba(6,10,16,.72);border:1px solid var(--line);padding:3px 8px;border-radius:999px;z-index:9}
+  .tag.left{left:10px} .tag.right{right:10px}
+
+  .spin{
+    position:absolute; z-index:12; display:none; align-items:center; gap:10px;
+    background:rgba(6,10,16,.82); border:1px solid var(--line); padding:12px 18px; border-radius:12px; font-size:13.5px;
+  }
+  .spin.on{display:flex}
+  .ring{width:16px;height:16px;border-radius:50%;border:2px solid #2b3a52;border-top-color:var(--accent);animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* filmstrip */
+  .strip{display:flex;gap:10px;overflow-x:auto;padding:2px 2px 6px;min-height:0}
+  .strip:empty{display:none}
+  .thumb{
+    position:relative;flex:none;width:74px;height:74px;border-radius:10px;overflow:hidden;cursor:pointer;
+    border:1.5px solid var(--line); background:repeating-conic-gradient(#1b2433 0 25%,#141b27 0 50%) 0 0/16px 16px;
+  }
+  .thumb img{width:100%;height:100%;object-fit:contain;display:block}
+  .thumb.active{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.18)}
+  .thumb .x{
+    position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:rgba(6,10,16,.8);
+    color:#cbd5e1;border:1px solid var(--line);font-size:11px;line-height:16px;text-align:center;display:none;
+  }
+  .thumb:hover .x{display:block}
+  .thumb.err{border-color:var(--danger)}
+  .thumb .spin-mini{position:absolute;inset:0;display:grid;place-items:center;background:rgba(6,10,16,.6)}
+  .thumb .spin-mini i{width:16px;height:16px;border-radius:50%;border:2px solid #2b3a52;border-top-color:var(--accent);animation:spin .8s linear infinite;display:block}
+
+  /* ---------- controls ---------- */
+  aside{display:flex;flex-direction:column;gap:14px;min-width:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .card h3{margin:0 0 12px;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);font-weight:650}
+  .field{margin-bottom:14px}
+  .field:last-child{margin-bottom:0}
+  label.lbl{display:block;font-size:12.5px;color:#a9b8ce;margin-bottom:6px}
+  select,input[type=text],input[type=number]{
+    width:100%;background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+    border-radius:9px;padding:9px 10px;font-size:13.5px;outline:none;
+  }
+  select:focus,input:focus{border-color:var(--accent)}
+  .seg{display:flex;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px}
+  .seg button{
+    flex:1;background:transparent;border:0;color:var(--muted);padding:7px 4px;border-radius:7px;
+    font-size:12.5px;cursor:pointer;font-family:inherit;transition:.12s;
+  }
+  .seg button.on{background:#22304a;color:#fff;box-shadow:0 1px 0 rgba(255,255,255,.05) inset}
+  .swatches{display:flex;gap:7px;align-items:center;margin-top:9px}
+  .sw{width:24px;height:24px;border-radius:7px;border:1.5px solid var(--line);cursor:pointer;padding:0}
+  .sw.on{box-shadow:0 0 0 2px var(--accent)}
+  input[type=color]{width:30px;height:26px;padding:0;border:1.5px solid var(--line);border-radius:7px;background:transparent;cursor:pointer}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .val{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12.5px;min-width:34px;text-align:right}
+  input[type=range]{width:100%;accent-color:var(--accent);margin:2px 0 0}
+  .switch{display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13px;color:#cdd9e8}
+  .switch input{display:none}
+  .track{width:36px;height:20px;border-radius:999px;background:#2a3648;position:relative;transition:.15s;flex:none}
+  .track::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#93a5bd;transition:.15s}
+  .switch input:checked + .track{background:var(--accent)}
+  .switch input:checked + .track::after{left:18px;background:#fff}
+
+  .btn{
+    width:100%;border:0;border-radius:10px;padding:11px 14px;font-size:13.5px;font-weight:600;font-family:inherit;
+    cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:.14s;
+  }
+  .btn.primary{background:linear-gradient(135deg,var(--accent),#6aa4ff);color:#06121f}
+  .btn.primary:hover{filter:brightness(1.07)}
+  .btn.ghost{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}
+  .btn.ghost:hover{border-color:#3a4c69}
+  .btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+  .btns{display:grid;gap:9px}
+  .hint{font-size:11.8px;color:#6f8099;line-height:1.45;margin:10px 0 0}
+  .kbdline{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:8px}
+  footer{padding:0 24px 26px;color:#5d6d85;font-size:12px;text-align:center}
+  .err-msg{color:var(--danger);font-size:12.5px;margin-top:10px;display:none}
+  .err-msg.on{display:block}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">B</div>
+  <div>
+    <h1>Background Remover</h1>
+    <div class="sub">Runs locally on your machine — nothing is uploaded anywhere</div>
+  </div>
+  <div class="status"><span class="dot" id="dot"></span><span id="engine">checking engine…</span></div>
+</header>
+
+<main>
+  <section class="stage-wrap">
+    <div class="stage" id="stage">
+      <div class="checker"></div>
+      <img id="imgOriginal" alt="" style="display:none" />
+      <img id="imgResult" alt="" style="display:none" />
+      <div class="divider" id="divider" style="display:none"></div>
+      <div class="tag left" id="tagLeft" style="display:none">Original</div>
+      <div class="tag right" id="tagRight" style="display:none">Cutout</div>
+      <div class="spin" id="spin"><span class="ring"></span><span id="spinText">Removing background…</span></div>
+
+      <div class="drop" id="drop">
+        <div class="icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>
+          </svg>
+        </div>
+        <h2>Drop images here</h2>
+        <p>or click to browse · PNG, JPG, WEBP · drop several at once for batch</p>
+        <p><span class="kbd">Ctrl</span> + <span class="kbd">V</span> to paste from clipboard</p>
+      </div>
+    </div>
+
+    <div class="strip" id="strip"></div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <h3>Output</h3>
+      <div class="field">
+        <label class="lbl">Background</label>
+        <div class="seg" id="segBg">
+          <button data-bg="transparent" class="on">Transparent</button>
+          <button data-bg="color">Colour</button>
+          <button data-bg="blur">Blur</button>
+        </div>
+        <div class="swatches" id="swatches" style="display:none">
+          <button class="sw on" data-color="#ffffff" style="background:#fff"></button>
+          <button class="sw" data-color="#0b0f16" style="background:#0b0f16"></button>
+          <button class="sw" data-color="#e5e7eb" style="background:#e5e7eb"></button>
+          <button class="sw" data-color="#fde68a" style="background:#fde68a"></button>
+          <button class="sw" data-color="#bfdbfe" style="background:#bfdbfe"></button>
+          <input type="color" id="picker" value="#ffffff" title="Pick any colour" />
+        </div>
+      </div>
+      <div class="field">
+        <label class="lbl">Format</label>
+        <select id="fmt">
+          <option value="png">PNG — keeps transparency</option>
+          <option value="jpg">JPG — white background</option>
+          <option value="webp">WEBP — small files</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Edge &amp; framing</h3>
+      <div class="field">
+        <div class="row"><label class="lbl" style="margin:0">Edge softness</label><span class="val" id="featherVal">1 px</span></div>
+        <input type="range" id="feather" min="0" max="6" step="0.5" value="1" />
+      </div>
+      <div class="field">
+        <div class="row"><label class="lbl" style="margin:0">Grow / shrink edge</label><span class="val" id="growVal">0 px</span></div>
+        <input type="range" id="grow" min="-4" max="4" step="1" value="0" />
+      </div>
+      <div class="field">
+        <label class="switch"><input type="checkbox" id="crop" /><span class="track"></span>Crop to subject</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Quality</h3>
+      <div class="field">
+        <label class="lbl">Model</label>
+        <select id="model"></select>
+        <p class="hint" id="modelHint"></p>
+      </div>
+    </div>
+
+    <div class="btns">
+      <button class="btn primary" id="download" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+        Download
+      </button>
+      <button class="btn ghost" id="downloadAll" disabled>Download all</button>
+      <button class="btn ghost" id="again" disabled>Re-run with these settings</button>
+    </div>
+    <div class="err-msg" id="err"></div>
+  </aside>
+</main>
+
+<footer>Powered by U²-Net / ISNet segmentation · your images never leave this computer</footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), drop = $("drop"), strip = $("strip");
+  const imgO = $("imgOriginal"), imgR = $("imgResult"), divider = $("divider");
+  const tagL = $("tagLeft"), tagR = $("tagRight"), spin = $("spin"), spinText = $("spinText");
+  const dlBtn = $("download"), dlAll = $("downloadAll"), againBtn = $("again"), errBox = $("err");
+  const dot = $("dot"), engineLbl = $("engine");
+
+  const state = {
+    items: [],          // {id, name, srcUrl, outUrl, blob, status}
+    activeId: null,
+    settings: { model: "u2netp", bg: "transparent", color: "#ffffff", feather: 1, grow: 0, crop: false, format: "png" },
+    busy: 0,
+    sliderAt: 0.5,
+  };
+  let seq = 0;
+
+  const MODELS = {
+    "u2netp": "Fast, 4.5 MB. Best for people and products.",
+    "u2net": "Sharper edges, 176 MB. Slower first run.",
+    "isnet-general-use": "Best all-rounder for tricky subjects, 170 MB.",
+    "silueta": "Tiny, decent on people.",
+  };
+
+  // ---------- engine status ----------
+  fetch("/api/health").then(r => r.json()).then(d => {
+    if (d.models && d.models.length) {
+      const sel = $("model");
+      sel.innerHTML = "";
+      d.models.forEach(m => {
+        const o = document.createElement("option");
+        o.value = m; o.textContent = m;
+        sel.appendChild(o);
+      });
+      sel.value = d.default || "u2netp";
+      state.settings.model = sel.value;
+      $("modelHint").textContent = MODELS[sel.value] || "";
+    }
+    engineLbl.textContent = d.ok ? "engine ready" : (d.error || "engine unavailable");
+    dot.style.background = d.ok ? "var(--accent-2)" : "var(--danger)";
+  }).catch(() => {
+    engineLbl.textContent = "engine offline";
+    dot.style.background = "var(--danger)";
+  });
+
+  // ---------- controls ----------
+  $("model").addEventListener("change", e => {
+    state.settings.model = e.target.value;
+    $("modelHint").textContent = MODELS[e.target.value] || "";
+    if (state.activeId) runActive();
+  });
+
+  $("segBg").addEventListener("click", e => {
+    const b = e.target.closest("button[data-bg]"); if (!b) return;
+    [...$("segBg").children].forEach(x => x.classList.toggle("on", x === b));
+    state.settings.bg = b.dataset.bg;
+    $("swatches").style.display = state.settings.bg === "color" ? "flex" : "none";
+    if (state.settings.bg === "color" && state.settings.format === "png") { /* keep png */ }
+    if (state.activeId) runActive();
+  });
+
+  $("swatches").addEventListener("click", e => {
+    const sw = e.target.closest(".sw"); if (!sw) return;
+    [...$("swatches").querySelectorAll(".sw")].forEach(x => x.classList.toggle("on", x === sw));
+    state.settings.color = sw.dataset.color;
+    $("picker").value = sw.dataset.color;
+    if (state.activeId) runActive();
+  });
+  $("picker").addEventListener("input", e => {
+    state.settings.color = e.target.value;
+    [...$("swatches").querySelectorAll(".sw")].forEach(x => x.classList.remove("on"));
+    if (state.activeId) runActive();
+  });
+
+  $("fmt").addEventListener("change", e => {
+    state.settings.format = e.target.value;
+    if (state.activeId) runActive();
+  });
+
+  const feather = $("feather"), grow = $("grow");
+  feather.addEventListener("input", () => {
+    state.settings.feather = parseFloat(feather.value);
+    $("featherVal").textContent = feather.value + " px";
+  });
+  feather.addEventListener("change", () => { if (state.activeId) runActive(); });
+  grow.addEventListener("input", () => {
+    state.settings.grow = parseInt(grow.value, 10);
+    $("growVal").textContent = (state.settings.grow > 0 ? "+" : "") + grow.value + " px";
+  });
+  grow.addEventListener("change", () => { if (state.activeId) runActive(); });
+  $("crop").addEventListener("change", e => {
+    state.settings.crop = e.target.checked;
+    if (state.activeId) runActive();
+  });
+
+  // ---------- file intake ----------
+  drop.addEventListener("click", () => picker.click());
+  const picker = document.createElement("input");
+  picker.type = "file"; picker.accept = "image/*"; picker.multiple = true;
+  picker.addEventListener("change", () => { addFiles([...picker.files]); picker.value = ""; });
+
+  ["dragenter", "dragover"].forEach(ev => stage.addEventListener(ev, e => {
+    e.preventDefault(); stage.classList.add("dragover");
+  }));
+  ["dragleave", "drop"].forEach(ev => stage.addEventListener(ev, e => {
+    e.preventDefault();
+    if (ev === "dragleave" && stage.contains(e.relatedTarget)) return;
+    stage.classList.remove("dragover");
+  }));
+  stage.addEventListener("drop", e => {
+    const files = [...(e.dataTransfer?.files || [])].filter(f => f.type.startsWith("image/"));
+    addFiles(files);
+  });
+  window.addEventListener("paste", e => {
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+    if (files.length) { e.preventDefault(); addFiles(files); }
+  });
+
+  async function addFiles(files) {
+    if (!files.length) return;
+    errBox.classList.remove("on");
+    const added = files.map(f => {
+      const item = {
+        id: ++seq, name: f.name || `pasted-${seq}.png`, file: f,
+        srcUrl: URL.createObjectURL(f), outUrl: null, blob: null, status: "queued",
+      };
+      state.items.push(item);
+      return item;
+    });
+    renderStrip();
+    select(added[0].id);
+    for (const item of added) await runItem(item);
+  }
+
+  // ---------- processing ----------
+  function params(extra = {}) {
+    const p = new URLSearchParams({
+      model: state.settings.model,
+      bg: state.settings.bg,
+      color: state.settings.color,
+      feather: String(state.settings.feather),
+      grow: String(state.settings.grow),
+      crop: state.settings.crop ? "1" : "0",
+      format: state.settings.format,
+    });
+    for (const k in extra) p.set(k, extra[k]);
+    return p;
+  }
+
+  async function runItem(item) {
+    item.status = "working";
+    renderStrip();
+    setBusy(1);
+    try {
+      const res = await fetch("/api/remove?" + params().toString(), {
+        method: "POST",
+        headers: { "Content-Type": item.file.type || "application/octet-stream", "X-Filename": encodeURIComponent(item.name) },
+        body: item.file,
+      });
+      if (!res.ok) throw new Error(await res.text() || ("HTTP " + res.status));
+      const blob = await res.blob();
+      if (item.outUrl) URL.revokeObjectURL(item.outUrl);
+      item.blob = blob;
+      item.outUrl = URL.createObjectURL(blob);
+      item.status = "done";
+    } catch (err) {
+      item.status = "error";
+      item.error = String(err.message || err);
+      showErr(item.error);
+    } finally {
+      setBusy(-1);
+      renderStrip();
+      if (item === active()) paintStage();
+      syncButtons();
+    }
+  }
+
+  function active() { return state.items.find(i => i.id === state.activeId) || null; }
+  function runActive() { const a = active(); if (a) runItem(a); }
+
+  function setBusy(delta) {
+    state.busy = Math.max(0, state.busy + delta);
+    const working = state.busy > 0;
+    spin.classList.toggle("on", working);
+    spinText.textContent = state.busy > 1
+      ? `Removing background… (${state.busy} in queue)`
+      : "Removing background…";
+    dot.classList.toggle("busy", working);
+  }
+
+  // ---------- rendering ----------
+  function renderStrip() {
+    strip.innerHTML = "";
+    state.items.forEach(item => {
+      const el = document.createElement("div");
+      el.className = "thumb" + (item.id === state.activeId ? " active" : "") + (item.status === "error" ? " err" : "");
+      el.title = item.name;
+      const img = document.createElement("img");
+      img.src = item.outUrl || item.srcUrl;
+      el.appendChild(img);
+      if (item.status === "working" || item.status === "queued") {
+        const s = document.createElement("div");
+        s.className = "spin-mini";
+        s.innerHTML = "<i></i>";
+        el.appendChild(s);
+      }
+      const x = document.createElement("button");
+      x.className = "x"; x.textContent = "×";
+      x.addEventListener("click", ev => {
+        ev.stopPropagation();
+        removeItem(item.id);
+      });
+      el.appendChild(x);
+      el.addEventListener("click", () => select(item.id));
+      strip.appendChild(el);
+    });
+  }
+
+  function removeItem(id) {
+    const i = state.items.findIndex(x => x.id === id);
+    if (i < 0) return;
+    const [it] = state.items.splice(i, 1);
+    if (it.srcUrl) URL.revokeObjectURL(it.srcUrl);
+    if (it.outUrl) URL.revokeObjectURL(it.outUrl);
+    if (state.activeId === id) {
+      state.activeId = state.items.length ? state.items[Math.max(0, i - 1)].id : null;
+    }
+    renderStrip();
+    paintStage();
+    syncButtons();
+  }
+
+  function select(id) {
+    state.activeId = id;
+    renderStrip();
+    paintStage();
+    syncButtons();
+  }
+
+  function paintStage() {
+    const a = active();
+    const hasOut = !!(a && a.outUrl);
+    drop.style.display = a ? "none" : "grid";
+    imgO.style.display = a ? "block" : "none";
+    imgR.style.display = hasOut ? "block" : "none";
+    divider.style.display = hasOut ? "block" : "none";
+    tagL.style.display = tagR.style.display = hasOut ? "block" : "none";
+    if (a) imgO.src = a.srcUrl;
+    if (hasOut) {
+      imgR.src = a.outUrl;
+      applySlider();
+    } else {
+      imgO.style.clipPath = "none";
+    }
+  }
+
+  function applySlider() {
+    const pct = Math.round(state.sliderAt * 100);
+    // Reveal the original only on the left of the handle; the cutout fills the rest.
+    imgO.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+    imgR.style.clipPath = "none";
+    divider.style.left = `calc(${pct}% - 1px)`;
+  }
+
+  // slider drag
+  let dragging = false;
+  const setFromEvent = (e) => {
+    const r = stage.getBoundingClientRect();
+    const x = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    state.sliderAt = Math.min(1, Math.max(0, x / r.width));
+    applySlider();
+  };
+  divider.addEventListener("mousedown", e => { dragging = true; e.preventDefault(); });
+  window.addEventListener("mousemove", e => { if (dragging) setFromEvent(e); });
+  window.addEventListener("mouseup", () => { dragging = false; });
+  divider.addEventListener("touchstart", e => { dragging = true; }, { passive: true });
+  window.addEventListener("touchmove", e => { if (dragging) setFromEvent(e); }, { passive: true });
+  window.addEventListener("touchend", () => { dragging = false; });
+  stage.addEventListener("click", e => {
+    if (!imgR.src || e.target.closest(".drop") || e.target.closest(".divider")) return;
+    setFromEvent(e);
+  });
+
+  function showErr(msg) { errBox.textContent = msg; errBox.classList.add("on"); }
+
+  function syncButtons() {
+    const a = active();
+    dlBtn.disabled = !(a && a.blob);
+    againBtn.disabled = !(a && a.file);
+    dlAll.disabled = !state.items.some(i => i.blob);
+  }
+
+  // ---------- downloads ----------
+  function baseName(name) { return (name || "image").replace(/\.[^.]+$/, ""); }
+  function extFor(blob) {
+    const t = blob.type;
+    if (t.includes("jpeg")) return "jpg";
+    if (t.includes("webp")) return "webp";
+    return "png";
+  }
+  function saveBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  dlBtn.addEventListener("click", () => {
+    const a = active(); if (!a || !a.blob) return;
+    saveBlob(a.blob, `${baseName(a.name)}-nobg.${extFor(a.blob)}`);
+  });
+
+  dlAll.addEventListener("click", () => {
+    state.items.filter(i => i.blob).forEach((i, idx) => {
+      setTimeout(() => saveBlob(i.blob, `${baseName(i.name)}-nobg.${extFor(i.blob)}`), idx * 350);
+    });
+  });
+
+  againBtn.addEventListener("click", runActive);
+
+  // keyboard: arrows nudge the slider, [ ] switch images
+  window.addEventListener("keydown", e => {
+    if (!imgR.src) return;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      state.sliderAt = Math.min(1, Math.max(0, state.sliderAt + (e.key === "ArrowLeft" ? -0.05 : 0.05)));
+      applySlider();
+    }
+    if (e.key === "[" || e.key === "]") {
+      const idx = state.items.findIndex(i => i.id === state.activeId);
+      const next = state.items[Math.min(state.items.length - 1, Math.max(0, idx + (e.key === "]" ? 1 : -1)))];
+      if (next) select(next.id);
+    }
+  });
+
+  paintStage();
+  syncButtons();
+})();
+</script>
+</body>
+</html>
