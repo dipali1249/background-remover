@@ -248,35 +248,63 @@
   const clearErr = () => errBox.classList.remove("on");
 
   // ------------------------------------------------------------------ model
+  // The model is ~4.6 MB. Keep it in Cache Storage so a second visit starts from
+  // the cache instead of the network.
+  const MODEL_CACHE = "bgr-model-v1";
+
+  async function fetchModelBytes() {
+    if (window.caches) {
+      try {
+        const cache = await caches.open(MODEL_CACHE);
+        const hit = await cache.match(MODEL_URL);
+        if (hit) {
+          const buf = await hit.arrayBuffer();
+          if (buf.byteLength > 1000) {
+            setStatus("model cached", "");
+            barFill.style.width = "100%";
+            return new Uint8Array(buf);
+          }
+        }
+      } catch (e) { /* private mode, storage full, etc. */ }
+    }
+    // XHR rather than fetch-streaming: progress works everywhere, redirects included.
+    const bytes = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", MODEL_URL, true);
+      xhr.responseType = "arraybuffer";
+      xhr.timeout = 180000;
+      xhr.onprogress = (e) => {
+        const pct = e.lengthComputable && e.total
+          ? Math.min(99, Math.round((e.loaded / e.total) * 100))
+          : Math.min(99, Math.round((e.loaded / 4574861) * 100));
+        setStatus("loading model " + pct + "%", "");
+        barFill.style.width = pct + "%";
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300 && xhr.response && xhr.response.byteLength > 1000) {
+          resolve(new Uint8Array(xhr.response));
+        } else {
+          reject(new Error("could not download the model (HTTP " + xhr.status + ")"));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error while downloading the model"));
+      xhr.ontimeout = () => reject(new Error("the model download timed out"));
+      xhr.send();
+    });
+    if (window.caches) {
+      try {
+        const cache = await caches.open(MODEL_CACHE);
+        await cache.put(MODEL_URL, new Response(bytes, { headers: { "Content-Type": "application/octet-stream" } }));
+      } catch (e) { /* not fatal */ }
+    }
+    return bytes;
+  }
+
   async function loadModel() {
     setStatus("loading model 0%", "");
     bar.classList.add("on");
     try {
-      // XHR (not fetch streaming) so the progress bar works in every browser,
-      // including Safari, and survives redirects to the CDN cleanly.
-      const bytes = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("GET", MODEL_URL, true);
-        xhr.responseType = "arraybuffer";
-        xhr.timeout = 180000;
-        xhr.onprogress = (e) => {
-          const pct = e.lengthComputable && e.total
-            ? Math.min(99, Math.round((e.loaded / e.total) * 100))
-            : Math.min(99, Math.round((e.loaded / 4574861) * 100));
-          setStatus("loading model " + pct + "%", "");
-          barFill.style.width = pct + "%";
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300 && xhr.response && xhr.response.byteLength > 1000) {
-            resolve(new Uint8Array(xhr.response));
-          } else {
-            reject(new Error("could not download the model (HTTP " + xhr.status + ")"));
-          }
-        };
-        xhr.onerror = () => reject(new Error("network error while downloading the model"));
-        xhr.ontimeout = () => reject(new Error("the model download timed out"));
-        xhr.send();
-      });
+      const bytes = await fetchModelBytes();
 
       // integrity: confirm we got exactly the model this page was tested with
       try {
@@ -302,7 +330,7 @@
       setTimeout(() => bar.classList.remove("on"), 400);
       setStatus("ready", "ok");
       window.dispatchEvent(new CustomEvent("bgr-ready"));
-      const pending = state.items.filter((i) => i.status === "queued");
+      const pending = state.items.filter((i) => i.status === "queued" || i.status === "waiting");
       for (const item of pending) await runItem(item);
     } catch (e) {
       setStatus("engine failed", "err");
@@ -336,6 +364,10 @@
     return c;
   }
 
+  // The model runs ONCE per image; the 320x320 matte is kept and re-used, so
+  // changing the background, colour, crop or format never re-runs inference.
+  const analysis = new Map();          // itemId -> { src, probs, box }
+
   async function predictMask(srcCanvas) {
     // 1. downscale to the model's input size
     const small = makeCanvas(SIZE, SIZE);
@@ -367,48 +399,49 @@
     const out = await state.session.run(feeds);
     const pred = out[state.session.outputNames[0]].data;
 
-    // 4. min-max normalise to 0..255 and paint into a mask canvas
+    // 4. min-max normalise to 0..1 (the matte, in model space)
     let mi = Infinity, ma = -Infinity;
     for (let i = 0; i < n; i++) { const v = pred[i]; if (v < mi) mi = v; if (v > ma) ma = v; }
     const range = (ma - mi) || 1;
-    const maskSmall = makeCanvas(SIZE, SIZE);
-    const mctx = maskSmall.getContext("2d");
-    const mimg = mctx.createImageData(SIZE, SIZE);
-    for (let i = 0; i < n; i++) {
-      const v = Math.max(0, Math.min(255, Math.round(((pred[i] - mi) / range) * 255)));
-      const p = i * 4;
-      mimg.data[p] = mimg.data[p + 1] = mimg.data[p + 2] = v;
-      mimg.data[p + 3] = 255;
+    const probs = new Float32Array(n);
+    for (let i = 0; i < n; i++) probs[i] = (pred[i] - mi) / range;
+    return probs;
+  }
+
+  // Separable box blur on the 320x320 matte: softening costs 200k ops instead of
+  // a full-resolution canvas blur, and scales with the image the same way.
+  function blurMask(probs, radius) {
+    const r = Math.max(1, Math.round(radius));
+    const tmp = new Float32Array(probs.length);
+    const out = new Float32Array(probs.length);
+    const norm = 1 / (2 * r + 1);
+    for (let y = 0; y < SIZE; y++) {
+      const row = y * SIZE;
+      let acc = 0;
+      for (let k = -r; k <= r; k++) acc += probs[row + Math.min(SIZE - 1, Math.max(0, k))];
+      for (let x = 0; x < SIZE; x++) {
+        tmp[row + x] = acc * norm;
+        acc += probs[row + Math.min(SIZE - 1, x + r + 1)] - probs[row + Math.max(0, x - r)];
+      }
     }
-    mctx.putImageData(mimg, 0, 0);
-    return maskSmall;
+    for (let x = 0; x < SIZE; x++) {
+      let acc = 0;
+      for (let k = -r; k <= r; k++) acc += tmp[Math.min(SIZE - 1, Math.max(0, k)) * SIZE + x];
+      for (let y = 0; y < SIZE; y++) {
+        out[y * SIZE + x] = acc * norm;
+        acc += tmp[Math.min(SIZE - 1, y + r + 1) * SIZE + x] - tmp[Math.max(0, y - r) * SIZE + x];
+      }
+    }
+    return out;
   }
 
-  function maskToAlpha(maskSmall, w, h, feather) {
-    const c = makeCanvas(w, h);
-    const ctx = c.getContext("2d", { willReadFrequently: true });
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    if (feather > 0) ctx.filter = "blur(" + (feather * (w / SIZE) / 2).toFixed(2) + "px)";
-    ctx.drawImage(maskSmall, 0, 0, w, h);
-    ctx.filter = "none";
-    return ctx.getImageData(0, 0, w, h).data;   // red channel is the alpha
-  }
-
-  async function compose(bitmap, settings) {
-    const src = sourceCanvas(bitmap);
-    const w = src.width, h = src.height;
-    const maskSmall = await predictMask(src);
-    const alpha = maskToAlpha(maskSmall, w, h, settings.feather);
-
-    const sctx = src.getContext("2d", { willReadFrequently: true });
-    const sdata = sctx.getImageData(0, 0, w, h);
-
-    // bounding box of the subject (for cropping)
-    let minX = w, minY = h, maxX = -1, maxY = -1;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (alpha[(y * w + x) * 4] > 12) {
+  // subject bounds, found on the 320x320 matte (102k pixels) not the full image
+  function boxFromProbs(probs, threshold) {
+    let minX = SIZE, minY = SIZE, maxX = -1, maxY = -1;
+    for (let y = 0; y < SIZE; y++) {
+      const row = y * SIZE;
+      for (let x = 0; x < SIZE; x++) {
+        if (probs[row + x] > threshold) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -416,46 +449,99 @@
         }
       }
     }
+    return maxX < 0 ? null : { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+  }
+
+  async function analyse(item) {
+    const hit = analysis.get(item.id);
+    if (hit) return hit;
+    const bitmap = await decode(item.file);
+    const src = sourceCanvas(bitmap);
+    if (bitmap.close) bitmap.close();
+    const probs = await predictMask(src);
+    const rec = { src: src, probs: probs, box: boxFromProbs(probs, 0.05) };
+    analysis.set(item.id, rec);
+    // keep memory bounded on long batches
+    if (analysis.size > 6) {
+      for (const key of analysis.keys()) {
+        if (key !== item.id && key !== state.activeId) { analysis.delete(key); break; }
+      }
+    }
+    return rec;
+  }
+
+  // Composite from the cached matte. No model involved, so this is fast enough to
+  // re-run on every slider tick.
+  function render(rec, settings) {
+    const src = rec.src, w = src.width, h = src.height;
+    const probs = settings.feather > 0 ? blurMask(rec.probs, settings.feather * 0.6) : rec.probs;
 
     let ox = 0, oy = 0, ow = w, oh = h;
-    if (settings.crop && maxX >= minX) {
-      const pad = Math.round(Math.max(maxX - minX, maxY - minY) * 0.04);
-      minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
-      maxX = Math.min(w - 1, maxX + pad); maxY = Math.min(h - 1, maxY + pad);
-      ox = minX; oy = minY; ow = maxX - minX + 1; oh = maxY - minY + 1;
+    if (settings.crop && rec.box) {
+      const sx = w / SIZE, sy = h / SIZE;
+      const bw = (rec.box.maxX - rec.box.minX) * sx, bh = (rec.box.maxY - rec.box.minY) * sy;
+      const pad = Math.round(Math.max(bw, bh) * 0.04);
+      ox = Math.max(0, Math.floor(rec.box.minX * sx) - pad);
+      oy = Math.max(0, Math.floor(rec.box.minY * sy) - pad);
+      ow = Math.max(1, Math.min(w, Math.ceil((rec.box.maxX + 1) * sx) + pad) - ox);
+      oh = Math.max(1, Math.min(h, Math.ceil((rec.box.maxY + 1) * sy) + pad) - oy);
+    }
+
+    // one read of the source, cropped to what we need
+    const sctx = src.getContext("2d", { willReadFrequently: true });
+    const srcData = sctx.getImageData(ox, oy, ow, oh).data;
+
+    // when the result must be opaque, blend against the background in the same pass
+    const solid = settings.bg === "color" || (settings.format === "jpg" && settings.bg === "transparent");
+    let cr = 255, cg = 255, cb = 255;
+    if (settings.bg === "color") {
+      const hex = settings.color.replace("#", "");
+      cr = parseInt(hex.slice(0, 2), 16); cg = parseInt(hex.slice(2, 4), 16); cb = parseInt(hex.slice(4, 6), 16);
     }
 
     const out = makeCanvas(ow, oh);
     const octx = out.getContext("2d");
+    const img = octx.createImageData(ow, oh);
+    const od = img.data;
 
-    // background layer
-    if (settings.bg === "color") {
-      octx.fillStyle = settings.color;
-      octx.fillRect(0, 0, ow, oh);
-    } else if (settings.bg === "blur") {
-      octx.filter = "blur(" + Math.round(Math.max(ow, oh) / 26) + "px)";
-      octx.drawImage(src, ox, oy, ow, oh, 0, 0, ow, oh);
-      octx.filter = "none";
-    }
-
-    // subject layer with the predicted alpha
-    const subj = makeCanvas(ow, oh);
-    const subjCtx = subj.getContext("2d", { willReadFrequently: true });
-    const sImg = subjCtx.createImageData(ow, oh);
+    const mx = SIZE / w, my = SIZE / h;
     for (let y = 0; y < oh; y++) {
-      for (let x = 0; x < ow; x++) {
-        const si = ((y + oy) * w + (x + ox)) * 4;
-        const di = (y * ow + x) * 4;
-        sImg.data[di] = sdata.data[si];
-        sImg.data[di + 1] = sdata.data[si + 1];
-        sImg.data[di + 2] = sdata.data[si + 2];
-        sImg.data[di + 3] = alpha[si];
+      const v = (y + oy + 0.5) * my - 0.5;
+      const y0 = Math.min(SIZE - 1, Math.max(0, Math.floor(v)));
+      const y1 = Math.min(SIZE - 1, y0 + 1);
+      const fy = Math.min(1, Math.max(0, v - y0));
+      const row0 = y0 * SIZE, row1 = y1 * SIZE;
+      let di = y * ow * 4, si = y * ow * 4;
+      for (let x = 0; x < ow; x++, di += 4, si += 4) {
+        const u = (x + ox + 0.5) * mx - 0.5;
+        const x0 = Math.min(SIZE - 1, Math.max(0, Math.floor(u)));
+        const x1 = Math.min(SIZE - 1, x0 + 1);
+        const fx = Math.min(1, Math.max(0, u - x0));
+        const a = (probs[row0 + x0] * (1 - fx) + probs[row0 + x1] * fx) * (1 - fy)
+                + (probs[row1 + x0] * (1 - fx) + probs[row1 + x1] * fx) * fy;
+        const r = srcData[si], g = srcData[si + 1], b = srcData[si + 2];
+        if (solid) {
+          od[di]     = r * a + cr * (1 - a);
+          od[di + 1] = g * a + cg * (1 - a);
+          od[di + 2] = b * a + cb * (1 - a);
+          od[di + 3] = 255;
+        } else {
+          od[di] = r; od[di + 1] = g; od[di + 2] = b; od[di + 3] = a * 255;
+        }
       }
     }
-    subjCtx.putImageData(sImg, 0, 0);
-    octx.drawImage(subj, 0, 0);
+    octx.putImageData(img, 0, 0);
 
-    return { canvas: out, hasSubject: maxX >= minX };
+    if (settings.bg === "blur") {
+      const bgCanvas = makeCanvas(ow, oh);
+      const bctx = bgCanvas.getContext("2d");
+      bctx.filter = "blur(" + Math.round(Math.max(ow, oh) / 26) + "px)";
+      bctx.drawImage(src, ox, oy, ow, oh, 0, 0, ow, oh);
+      bctx.filter = "none";
+      bctx.drawImage(out, 0, 0);
+      return bgCanvas;
+    }
+    return out;
   }
 
   // ------------------------------------------------------------ file intake
@@ -519,22 +605,11 @@
     renderStrip();
     setBusy(1);
     try {
-      const bitmap = await decode(item.file);
-      const { canvas } = await compose(bitmap, state.settings);
-      if (bitmap.close) bitmap.close();
-      const blob = await new Promise((res, rej) => {
-        if (state.settings.format === "jpg") {
-          // JPEG has no alpha: flatten onto the chosen colour (white unless colour bg)
-          const flat = makeCanvas(canvas.width, canvas.height);
-          const fctx = flat.getContext("2d");
-          fctx.fillStyle = state.settings.bg === "color" ? state.settings.color : "#ffffff";
-          fctx.fillRect(0, 0, flat.width, flat.height);
-          fctx.drawImage(canvas, 0, 0);
-          flat.toBlob((b) => (b ? res(b) : rej(new Error("could not encode JPEG"))), "image/jpeg", 0.95);
-        } else {
-          canvas.toBlob((b) => (b ? res(b) : rej(new Error("could not encode PNG"))), "image/png");
-        }
-      });
+      const rec = await analyse(item);              // model only the first time
+      const canvas = render(rec, state.settings);   // instant afterwards
+      const type = state.settings.format === "jpg" ? "image/jpeg" : "image/png";
+      const blob = await new Promise((res, rej) => canvas.toBlob(
+        (b) => (b ? res(b) : rej(new Error("could not encode the image"))), type, 0.95));
       if (item.outUrl) URL.revokeObjectURL(item.outUrl);
       item.blob = blob;
       item.outUrl = URL.createObjectURL(blob);
@@ -587,6 +662,7 @@
     const i = state.items.findIndex((x) => x.id === id);
     if (i < 0) return;
     const [it] = state.items.splice(i, 1);
+    analysis.delete(id);
     if (it.srcUrl) URL.revokeObjectURL(it.srcUrl);
     if (it.outUrl) URL.revokeObjectURL(it.outUrl);
     if (state.activeId === id) state.activeId = state.items.length ? state.items[Math.max(0, i - 1)].id : null;

@@ -153,7 +153,29 @@ colour to its background and needs a manual mask.
 
 **HEIC photos from an iPhone** — install `pillow-heif` and the tool reads them.
 
-## 7. Files
+## 7. Speed
+
+The hosted version is built around one idea: the model runs **once per photo**.
+Its 320x320 matte is kept in memory, so changing the background, the colour, the crop,
+the edge softness or the output format re-composites from that matte in a fraction of a
+second instead of re-running the network. On a test machine, changing the background
+colour went from about 10 s to about 0.25 s.
+
+Two other things that help:
+
+- The 4.6 MB model is stored in the browser's Cache Storage, so a return visit is ready
+  in a second or two rather than re-downloading it.
+- Big photos are scaled to 2400 px on the long edge before processing, and the subject
+  bounds and edge softening are computed on the small matte rather than at full
+  resolution.
+
+What it can't do: inference itself runs on single-threaded WebAssembly. Multi-threaded
+WASM requires the page to be cross-origin isolated (COOP/COEP response headers), and
+GitHub Pages cannot send custom headers. A WebGPU path would be considerably faster on
+suitable hardware, but it is not shipped here because it could not be tested — the
+browser available in this project's environment has no GPU adapter.
+
+## 8. Files
 
 ```
 bg_remove.py        engine + command-line tool
