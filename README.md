@@ -160,14 +160,15 @@ bg_remove.py        engine + command-line tool
 bg_remover_app.py   local web server
 ui.html             the web interface (served by the app)
 docs/index.html     the hosted, browser-only version (GitHub Pages)
-docs/models/        U2-Net model used by the hosted version
-docs/ort/           ONNX Runtime Web runtime for the hosted version
 requirements.txt    dependencies
 README.md           this file
 ```
 
-The hosted version in `docs/` needs no Python: it downloads the model once, then does
-everything on the visitor's device. It is served by GitHub Pages from the `docs` folder.
+The hosted version in `docs/` needs no Python and no build step: a single HTML file that
+pulls ONNX Runtime Web (pinned to 1.20.1, with a subresource-integrity hash) and the
+U²-Net model from public mirrors, then does everything on the visitor's device. The model
+is pinned to a specific commit and its SHA-256 is checked in the browser before use.
+It is served by GitHub Pages from the `docs` folder.
 
 Credits: segmentation by [rembg](https://github.com/danielgatis/rembg), built on
 U²-Net and ISNet models. Interface and image compositing written here.

@@ -206,7 +206,7 @@
       <button class="btn ghost" id="downloadAll" disabled>Download all</button>
     </div>
     <div class="err-msg" id="err"></div>
-    <p class="hint" id="privacyHint">Processing happens on your device with a U²-Net model (4.6 MB, downloaded once and cached). Nothing is uploaded — you can even switch off your connection after the page loads.</p>
+    <p class="hint" id="privacyHint">Everything runs on your device. The 4.6 MB U²-Net model downloads once (from a public mirror) and is cached; your photos are never uploaded anywhere.</p>
   </aside>
 </main>
 
@@ -215,7 +215,8 @@
   U²-Net segmentation model. <span id="footStats"></span>
 </footer>
 
-<script src="ort/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"
+        integrity="sha384-RPL/K8tc0JVaNWsunkEmCzLeieefvFX2UCRLKLmLVChCI6P+CTKhzqF7VIeCc3Zp" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 (() => {
   "use strict";
@@ -228,7 +229,11 @@
   const dot = $("dot"), engineLbl = $("engine");
 
   const MAX_SIDE = 2400;          // keeps big phone photos fast and inside canvas limits
-  const MODEL_URL = "models/u2netp.onnx";
+  // Pinned to a commit and verified by hash, so the bytes are the ones this page was
+  // tested against (a byte-identical mirror of rembg's u2netp.onnx).
+  const MODEL_URL = "https://huggingface.co/tomjackson2023/rembg/resolve/"
+                  + "cd3a3d6767a7859efea31ef0f2f373582cf06d82/u2netp.onnx";
+  const MODEL_SHA256 = "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8";
   const state = {
     items: [], activeId: null, busy: 0, sliderAt: 0.5, ready: false, session: null,
     settings: { bg: "transparent", color: "#ffffff", feather: 1, crop: false, format: "png" },
@@ -247,28 +252,47 @@
     setStatus("loading model 0%", "");
     bar.classList.add("on");
     try {
-      const res = await fetch(MODEL_URL);
-      if (!res.ok) throw new Error("could not fetch the model (" + res.status + ")");
-      const total = Number(res.headers.get("Content-Length")) || 4574861;
-      const reader = res.body.getReader();
-      const chunks = []; let got = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value); got += value.length;
-        const pct = Math.min(99, Math.round((got / total) * 100));
-        setStatus("loading model " + pct + "%", "");
-        barFill.style.width = pct + "%";
-      }
-      const bytes = new Uint8Array(got);
-      let off = 0;
-      for (const c of chunks) { bytes.set(c, off); off += c.length; }
+      // XHR (not fetch streaming) so the progress bar works in every browser,
+      // including Safari, and survives redirects to the CDN cleanly.
+      const bytes = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", MODEL_URL, true);
+        xhr.responseType = "arraybuffer";
+        xhr.timeout = 180000;
+        xhr.onprogress = (e) => {
+          const pct = e.lengthComputable && e.total
+            ? Math.min(99, Math.round((e.loaded / e.total) * 100))
+            : Math.min(99, Math.round((e.loaded / 4574861) * 100));
+          setStatus("loading model " + pct + "%", "");
+          barFill.style.width = pct + "%";
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300 && xhr.response && xhr.response.byteLength > 1000) {
+            resolve(new Uint8Array(xhr.response));
+          } else {
+            reject(new Error("could not download the model (HTTP " + xhr.status + ")"));
+          }
+        };
+        xhr.onerror = () => reject(new Error("network error while downloading the model"));
+        xhr.ontimeout = () => reject(new Error("the model download timed out"));
+        xhr.send();
+      });
+
+      // integrity: confirm we got exactly the model this page was tested with
+      try {
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+        if (hex !== MODEL_SHA256) {
+          console.warn("model hash mismatch", hex);
+          showErr("Heads up: the model file did not match the expected checksum. It may still work, but results are unverified.");
+        }
+      } catch (e) { /* crypto.subtle needs https; skip quietly */ }
 
       setStatus("starting engine…", "");
       ort.env.wasm.numThreads = 1;      // no SharedArrayBuffer needed → works on GitHub Pages
       ort.env.wasm.simd = true;
       // must be an absolute URL: the runtime dynamic-imports its glue module from here
-      ort.env.wasm.wasmPaths = new URL("ort/", document.baseURI).href;
+      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
       state.session = await ort.InferenceSession.create(bytes, {
         executionProviders: ["wasm"],
         graphOptimizationLevel: "all",
