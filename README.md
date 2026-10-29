@@ -1,5 +1,16 @@
 # Background Remover
 
+**Use it right now: <https://dipali1249.github.io/background-remover/>** — open the page and
+drop a photo. Nothing to install; the model runs inside your browser and your images are
+never uploaded.
+
+There is also a local version (below) that gives you the command line, batch folders,
+background-image replacement and model choice.
+
+---
+
+# Local tool
+
 A local image background remover — a drag-and-drop web app plus a command-line tool.
 The subject is found with a U²-Net / ISNet segmentation model, then composited onto a
 transparent, solid-colour, blurred or custom-image background.
@@ -148,9 +159,15 @@ colour to its background and needs a manual mask.
 bg_remove.py        engine + command-line tool
 bg_remover_app.py   local web server
 ui.html             the web interface (served by the app)
+docs/index.html     the hosted, browser-only version (GitHub Pages)
+docs/models/        U2-Net model used by the hosted version
+docs/ort/           ONNX Runtime Web runtime for the hosted version
 requirements.txt    dependencies
 README.md           this file
 ```
+
+The hosted version in `docs/` needs no Python: it downloads the model once, then does
+everything on the visitor's device. It is served by GitHub Pages from the `docs` folder.
 
 Credits: segmentation by [rembg](https://github.com/danielgatis/rembg), built on
 U²-Net and ISNet models. Interface and image compositing written here.
