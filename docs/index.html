@@ -162,6 +162,19 @@
 
   <aside>
     <div class="card">
+      <h3>Model</h3>
+      <div class="field">
+        <select id="quality">
+          <option value="lite">Fast — U²-Net lite (4.6 MB)</option>
+          <option value="full">High quality — U²-Net full (176 MB)</option>
+        </select>
+        <p class="hint" id="qualityHint">Picks the subject reliably on simple photos. The full model keeps up
+        much better with awkward subjects — fur, knitwear, thin straps, busy backgrounds — but is about
+        three times slower and downloads 176 MB once.</p>
+      </div>
+    </div>
+
+    <div class="card">
       <h3>Background</h3>
       <div class="field">
         <div class="seg" id="segBg">
@@ -206,7 +219,7 @@
       <button class="btn ghost" id="downloadAll" disabled>Download all</button>
     </div>
     <div class="err-msg" id="err"></div>
-    <p class="hint" id="privacyHint">Everything runs on your device. The 4.6 MB U²-Net model downloads once (from a public mirror) and is cached; your photos are never uploaded anywhere.</p>
+    <p class="hint" id="privacyHint">Everything runs on your device. The model downloads once (4.6 MB for Fast, 176 MB for High quality) from a public mirror and is cached; your photos are never uploaded anywhere.</p>
   </aside>
 </main>
 
@@ -229,14 +242,28 @@
   const dot = $("dot"), engineLbl = $("engine");
 
   const MAX_SIDE = 2400;          // keeps big phone photos fast and inside canvas limits
-  // Pinned to a commit and verified by hash, so the bytes are the ones this page was
-  // tested against (a byte-identical mirror of rembg's u2netp.onnx).
-  const MODEL_URL = "https://huggingface.co/tomjackson2023/rembg/resolve/"
-                  + "cd3a3d6767a7859efea31ef0f2f373582cf06d82/u2netp.onnx";
-  const MODEL_SHA256 = "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8";
+  // Both models are pinned to a commit and checked against a hash in the browser.
+  // lite is the default; full is much better on difficult subjects but 38x bigger.
+  const MODELS = {
+    lite: {
+      name: "U²-Net lite", mb: 4.6,
+      url: "https://huggingface.co/tomjackson2023/rembg/resolve/"
+         + "cd3a3d6767a7859efea31ef0f2f373582cf06d82/u2netp.onnx",
+      sha: "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+    },
+    full: {
+      name: "U²-Net full", mb: 176,
+      url: "https://huggingface.co/tomjackson2023/rembg/resolve/"
+         + "cd3a3d6767a7859efea31ef0f2f373582cf06d82/u2net.onnx",
+      sha: "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
+    },
+  };
+  let MODEL_URL = MODELS.lite.url;
+  let MODEL_SHA256 = MODELS.lite.sha;
   const state = {
     items: [], activeId: null, busy: 0, sliderAt: 0.5, ready: false, session: null,
     settings: { bg: "transparent", color: "#ffffff", feather: 1, crop: false, format: "png" },
+    quality: (localStorage.getItem("bgr-quality") === "full" ? "full" : "lite"),
   };
   let seq = 0;
 
@@ -301,7 +328,9 @@
   }
 
   async function loadModel() {
-    setStatus("loading model 0%", "");
+    MODEL_URL = MODELS[state.quality].url;
+    MODEL_SHA256 = MODELS[state.quality].sha;
+    setStatus("loading " + MODELS[state.quality].name + " 0%", "");
     bar.classList.add("on");
     try {
       const bytes = await fetchModelBytes();
@@ -405,7 +434,43 @@
     const range = (ma - mi) || 1;
     const probs = new Float32Array(n);
     for (let i = 0; i < n; i++) probs[i] = (pred[i] - mi) / range;
-    return probs;
+    return dropSpecks(probs);
+  }
+
+  // The model often leaves tiny islands floating in the background. Remove only
+  // specks — never anything connected to the subject — so real parts stay intact.
+  function dropSpecks(probs, areaFrac = 0.002, relFrac = 0.05) {
+    const n = probs.length;
+    const seen = new Uint8Array(n);
+    const stack = new Int32Array(n);
+    const total = (() => { let t = 0; for (let i = 0; i < n; i++) if (probs[i] >= 0.5) t++; return t; })();
+    if (!total) return probs;
+    const comps = [];
+    for (let start = 0; start < n; start++) {
+      if (seen[start] || probs[start] < 0.5) continue;
+      let sp = 0, count = 0;
+      stack[sp++] = start; seen[start] = 1;
+      const pixels = [];
+      while (sp > 0) {
+        const idx = stack[--sp];
+        pixels.push(idx); count++;
+        const x = idx % SIZE, y = (idx - x) / SIZE;
+        if (x > 0 && !seen[idx - 1] && probs[idx - 1] >= 0.5) { seen[idx - 1] = 1; stack[sp++] = idx - 1; }
+        if (x < SIZE - 1 && !seen[idx + 1] && probs[idx + 1] >= 0.5) { seen[idx + 1] = 1; stack[sp++] = idx + 1; }
+        if (y > 0 && !seen[idx - SIZE] && probs[idx - SIZE] >= 0.5) { seen[idx - SIZE] = 1; stack[sp++] = idx - SIZE; }
+        if (y < SIZE - 1 && !seen[idx + SIZE] && probs[idx + SIZE] >= 0.5) { seen[idx + SIZE] = 1; stack[sp++] = idx + SIZE; }
+      }
+      comps.push({ count: count, pixels: pixels });
+    }
+    if (comps.length <= 1) return probs;
+    const biggest = comps.reduce((m, c) => Math.max(m, c.count), 0);
+    const out = Float32Array.from(probs);
+    for (const c of comps) {
+      if (c.count < total * areaFrac && c.count < biggest * relFrac) {
+        for (const idx of c.pixels) out[idx] = 0;
+      }
+    }
+    return out;
   }
 
   // Separable box blur on the 320x320 matte: softening costs 200k ops instead of
@@ -716,6 +781,27 @@
   }
 
   // ---------------------------------------------------------------- controls
+  // --------------------------------------------------------------- model choice
+  $("quality").value = state.quality;
+
+  async function switchModel(key) {
+    if (!MODELS[key] || (key === state.quality && state.session)) return;
+    state.quality = key;
+    try { localStorage.setItem("bgr-quality", key); } catch (e) { /* ignore */ }
+    analysis.clear();                       // cached mattes came from the other model
+    state.ready = false;
+    if (state.session && state.session.release) {
+      try { state.session.release(); } catch (e) { /* ignore */ }
+    }
+    state.session = null;
+    clearErr();
+    await loadModel();
+    const a = active();
+    if (a) runItem(a);
+  }
+
+  $("quality").addEventListener("change", (e) => switchModel(e.target.value));
+
   $("segBg").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-bg]"); if (!b) return;
     [...$("segBg").children].forEach((x) => x.classList.toggle("on", x === b));

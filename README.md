@@ -153,7 +153,28 @@ colour to its background and needs a manual mask.
 
 **HEIC photos from an iPhone** — install `pillow-heif` and the tool reads them.
 
-## 7. Speed
+## 7. Accuracy
+
+The hosted page offers two models in the **Model** card, and remembers your choice:
+
+| Option | Model | Size | When to use it |
+| --- | --- | --- | --- |
+| Fast (default) | U²-Net lite | 4.6 MB | simple photos: one clear subject on a plain-ish background |
+| High quality | U²-Net full | 176 MB | fur, knitwear, thin straps, busy backgrounds — anything the lite model drops |
+
+The full model is roughly three times slower per photo and downloads once (then it is
+cached). On a test photo of a pug in a knit sweater the lite model kept the head but lost
+almost the whole sweater; the full model kept both.
+
+Tiny floating islands left in the background are removed automatically. Only specks are
+dropped — anything connected to the subject is left alone, so thin parts such as a watch
+strap survive.
+
+Neither model is magic: a subject that matches its background in colour or brightness
+(a white product on white, dark hair against a dark wall) can still lose parts. For those
+cases the local tool can use `--model isnet-general-use`, which copes with more of them.
+
+## 8. Speed
 
 The hosted version is built around one idea: the model runs **once per photo**.
 Its 320x320 matte is kept in memory, so changing the background, the colour, the crop,
@@ -175,7 +196,7 @@ GitHub Pages cannot send custom headers. A WebGPU path would be considerably fas
 suitable hardware, but it is not shipped here because it could not be tested — the
 browser available in this project's environment has no GPU adapter.
 
-## 8. Files
+## 9. Files
 
 ```
 bg_remove.py        engine + command-line tool
